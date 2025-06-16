@@ -1,1 +1,1 @@
-# MS-Capstone
+# Capstone Project
