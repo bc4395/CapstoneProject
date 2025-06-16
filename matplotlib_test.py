@@ -1,5 +1,24 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
+from scipy.stats import linregress
+
+# Load the CSV
+df = pd.read_csv("A4C4.csv")
+
+# Calculate shear stress (τ = SR * Vis)
+df['Tau'] = df['SR'] * df['Vis']
+
+# Take logs
+log_SR = np.log(df['SR'])
+log_Tau = np.log(df['Tau'])
+
+# Linear regression
+slope, intercept, r_value, p_value, std_err = linregress(log_SR, log_Tau)
+
+# Power-law index (n) and Consistency index (K)
+n = slope
+K = np.exp(intercept)
 
 def calculate_shear_stress(Q, R_0, k, L, K, n, positions):
     """
@@ -28,8 +47,6 @@ R_0 = 0.01  # Inlet radius (m)
 R_L = 0.005  # Outlet radius (m)
 L = 0.01  # Nozzle length (m)
 k = (R_0 - R_L) / L  # Taper factor (m/m)
-K = 0.1  # Consistency index (Pa·s^n), adjusted to fit ~200 Pa
-n = 0.6  # Power-law index (shear-thinning fluid)
 
 # Positions along the nozzle
 positions_m = np.linspace(0, L, 100)
@@ -55,6 +72,3 @@ plt.tight_layout()
 
 # Show plot
 plt.show()
-
-# Print maximum shear stress
-print(f"Maximum shear stress: {shear_stress_tau.max():.2f} Pa")
