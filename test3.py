@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
-from vedo import *
 import random
+from vedo import *
 
 # ----------------- Power-law Viscosity Model -----------------
 def model(sr, K, n):
@@ -102,11 +102,12 @@ if __name__ == "__main__":
     except ImportError:
         cmap = "plasma"
 
-    # Apply colormap and scalar bar to nozzle
+    # Apply colormap and scalar bar
     mesh.pointdata["Shear Stress"] = shear_vals
     mesh.cmap(cmap, shear_vals, on="points")
     mesh.alpha(1)
     mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
+
 
     # Slice plane setup
     zmin, zmax = mesh.bounds()[4], mesh.bounds()[5]
@@ -138,97 +139,68 @@ if __name__ == "__main__":
         slice2d.lighting("off")
         plt.at(1).remove("Slice").add(slice2d)
 
-    # --- Setup three-panel vedo plotter ---
-    plt = Plotter(N=3, axes=1, bg="k", bg2="bb")
-
-    # # Add nozzle and initial slicing to panels 0 and 1
-    # nozzle_text = Text2D(f"""
-    # Nozzle Geometry:
-    #     Inlet Radius: {R_in*1e6:.0f} µm
-    #     Outlet Radius: {R_out*1e6:.0f} µm
-    #     Length: {L*1e3:.2f} mm
-
-    # Fluid Model:
-    #     K: {K:.4e} Pa·sⁿ
-    #     n: {n:.4f}
-    #     Pressure: {pressure_psi:.1f} psi ({pressure_pa:.0f} Pa)
-    #     Flow Rate: {Q:.3e} m³/s
-    # """, pos="bottom-left", c="w", bg="k7", font="Courier")
-
-    plt.at(0).add(mesh)
-
+    # Setup vedo plotter
+    plt = Plotter(N=2, axes=1, bg="k", bg2="bb")
     pcutter = PlaneCutter(vslice, normal=normal, alpha=0, c="white")
     pcutter.add_observer("interaction", func)
+
+    summary = f"""\nNozzle Geometry:
+        Inlet Radius: {R_in*1e6:.0f} µm
+        Outlet Radius: {R_out*1e6:.0f} µm
+        Length: {L*1e3:.2f} mm
+
+        Fluid Model:
+        K: {K:.4e} Pa·sⁿ
+        n: {n:.4f}
+        Pressure: {pressure_psi:.1f} psi ({pressure_pa:.0f} Pa)
+        Flow Rate: {Q:.3e} m³/s
+        """
+    
+    # ----------------- Add a "Cell" Sphere Inside the Nozzle -----------------
+    # Find nozzle bounds to randomly place the sphere within the nozzle length and radius
+    z_min, z_max = mesh.bounds()[4], mesh.bounds()[5]
+    radius_min, radius_max = R_out, R_in  # Nozzle radius varies from inlet to outlet
+
+    # Choose a random z-position inside nozzle length (leave margin for sphere radius)
+    sphere_radius = 0.0005  # 0.5 mm radius cell, adjust as needed
+    z_pos = random.uniform(z_min + sphere_radius, z_max - sphere_radius)
+
+    # Compute local nozzle radius at z_pos (linear taper)
+    local_radius = R_in - (R_in - R_out) * (z_pos / L)
+
+    # Place cell randomly within local nozzle cross-section (circle)
+    theta = random.uniform(0, 2 * np.pi)
+    r = random.uniform(0, local_radius - sphere_radius)
+    x_pos = r * np.cos(theta)
+    y_pos = r * np.sin(theta)
+
+    # Create the sphere mesh (cell)
+    cell = Sphere(pos=(x_pos, y_pos, z_pos), r=sphere_radius, res=30)
+
+    # Interpolate shear stress on sphere surface points
+    cell_pts = cell.points
+    # Note: shear interpolator expects (z,y,x), so reorder coordinates
+    interp_points = np.c_[cell_pts[:, 2], cell_pts[:, 1], cell_pts[:, 0]]
+
+    cell_shear = interpolator(interp_points)
+    cell.pointdata["Shear Stress"] = cell_shear
+
+    # Apply colormap for visualization
+    cell.cmap(cmap, cell_shear, on="points")
+    cell.alpha(0.8)
+
+    # Add sphere to plotter
+    plt.at(0).add(cell)
+
+    # Export cell mesh with shear stress data
+    export_filename = "cell_shear_stress.vtk"  # .stl will not save point data
+    cell.write(export_filename)
+    print(f"Exported cell mesh with shear stress data to '{export_filename}'")
+
+
+    plt.at(0).add(mesh, Text2D(summary, pos="bottom-left", c="w", bg="k7", font="Courier"), "3D Shear Stress Distribution")
     plt.at(1).add(pcutter, vslice, mesh.box())
     pcutter.on()
-
-    # --- Create draggable cell sphere in third panel ---
-    sphere_radius = 0.0005  # 0.5 mm radius cell
-    # Initial position inside nozzle (centered)
-    initial_z = (zmin + zmax) / 2
-    initial_local_radius = R_in - (R_in - R_out) * (initial_z / L)
-    initial_x, initial_y = 0, 0  # Start centered
-
-    cell = Sphere(pos=(initial_x, initial_y, initial_z), r=sphere_radius, res=30, c='red')
-
-    # White indicator sphere on nozzle plot
-    indicator = Sphere(pos=cell.pos(), r=sphere_radius/4, c='white', alpha=1)
-
-    # Add indicator to nozzle plot
-    plt.at(0).add(indicator)
-
-    def update_shear_on_cell(pos):
-        # Clamp Z within nozzle length +/- margin for radius
-        z = np.clip(pos[2], zmin + sphere_radius, zmax - sphere_radius)
-        # Compute local nozzle radius at z
-        local_r = R_in - (R_in - R_out) * (z / L)
-        # Clamp XY within circle of radius (local_r - sphere_radius)
-        x, y = pos[0], pos[1]
-        r_xy = np.sqrt(x**2 + y**2)
-        max_r = local_r - sphere_radius
-        if r_xy > max_r:
-            x = x * max_r / r_xy
-            y = y * max_r / r_xy
-        # New clamped position
-        new_pos = np.array([x, y, z])
-        cell.pos(new_pos)
-
-        # Interpolate shear stress on cell surface
-        pts = cell.points
-        interp_pts = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z,y,x)
-        shear_vals = interpolator(interp_pts)
-
-        cell.pointdata["Shear Stress"] = shear_vals
-        cell.cmap(cmap, shear_vals, on="points")
-
-        # Update indicator position on nozzle plot
-        indicator.pos(new_pos)
-        plt.at(0).render()
-        plt.at(2).render()
-
-    # Initialize shear on cell and indicator
-    update_shear_on_cell(cell.pos())
-
-    # Make cell draggable with constrained movement inside nozzle bounds
-    def drag_callback(widget, event):
-        pos = widget.pos()
-        update_shear_on_cell(pos)
-
-    cell.draggable(True)
-
-    # Add draggable cell and instructions to third panel
-    instruction_text = Text2D("Drag the red cell to see shear stress update.\nPosition shown on nozzle as white sphere.", 
-                              pos="bottom-left", c="w")
-    plt.at(2).add(cell, instruction_text)
-
-    # ---- Sync camera zoom and position for consistency ----
-    # We'll link cameras across all three views
-    def sync_cameras(event):
-        cam = plt.at(0).camera()
-        plt.at(1).camera(cam)
-        plt.at(2).camera(cam)
-        plt.render()
-
     plt.show(zoom=1.2)
     plt.interactive()
     plt.close()
