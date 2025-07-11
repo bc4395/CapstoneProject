@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from scipy.interpolate import LinearNDInterpolator
+from vedo import *
 
 # ----------------- Power-law Viscosity Model -----------------
 def model(sr, K, n):
@@ -20,62 +21,125 @@ def calculate_flow_rate(r1, r2, L, K, n, delta_P):
         flow_sum += Qz * dz
     return flow_sum
 
-# ----------------- Generate Shear Stress Grid for 1 Cross Section -----------------
-def compute_shear_grid(Q, Rz, K, n, resolution=100):
-    r_vals = np.linspace(0, Rz, resolution)
-    theta_vals = np.linspace(0, 2 * np.pi, resolution)
-    rr, tt = np.meshgrid(r_vals, theta_vals)
-
-    gamma_dot = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (rr / Rz)**(1/n)
-    shear = K * np.abs(gamma_dot)**n
-
-    xx = rr * np.cos(tt)
-    yy = rr * np.sin(tt)
-
-    return xx, yy, shear
-
-# ----------------- Main Script -----------------
+# ----------------- Main -----------------
 if __name__ == "__main__":
-    # Load and fit power-law model
-    df = pd.read_csv("A4C4.csv")
-    sr_data = df['SR'].values
-    vis_data = df['Vis'].values
-    K, n = curve_fit(model, sr_data, vis_data, p0=[1.0, 1.0])[0]
+    # --- Load viscosity data and fit power-law model ---
+    try:
+        df = pd.read_csv("A4C4.csv")
+        sr_data = df['SR'].values
+        vis_data = df['Vis'].values
+        K, n = curve_fit(model, sr_data, vis_data, p0=[1.0, 1.0])[0]
+    except Exception as e:
+        raise RuntimeError(f"Failed to load or fit data: {e}")
 
-    # Geometry and pressure
-    R_in = 0.00175
-    R_out = 0.0004318
-    L = 0.0314
+    # --- Geometry and pressure ---
+    R_in = 0.00175     # Inlet radius (m)
+    R_out = 0.0004318  # Outlet radius (m)
+    L = 0.0314         # Nozzle length (m)
 
-    pressure_psi = float(input("Enter pressure used (psi): "))
+    try:
+        pressure_psi = float(input("Enter pressure used (psi): "))
+    except ValueError:
+        raise ValueError("Invalid input.")
     pressure_pa = pressure_psi * 6894.76
+
+    # --- Compute flow rate ---
     Q = calculate_flow_rate(R_in, R_out, L, K, n, pressure_pa)
 
-    # Set up subplots
-    num_sections = 15
-    z_vals = np.linspace(0, L, num_sections)
-    ncols = 5
-    nrows = int(np.ceil(num_sections / ncols))
-    fig, axs = plt.subplots(nrows, ncols, figsize=(15, 3 * nrows), constrained_layout=True)
+    # --- Generate point cloud inside conical nozzle ---
+    nz = 120       # z-layers
+    nr = 40        # radial divisions
+    ntheta = 80    # angular steps
 
-    for i, z in enumerate(z_vals):
-        Rz = R_in - ((R_in - R_out) / L) * z
-        xx, yy, shear = compute_shear_grid(Q, Rz, K, n)
+    z_vals = np.linspace(0, L, nz)
+    points = []
+    shear_vals = []
 
-        row, col = divmod(i, ncols)
-        ax = axs[row, col] if nrows > 1 else axs[col]
-        pcm = ax.pcolormesh(xx, yy, shear, shading='auto', cmap='plasma')
-        ax.set_title(f"Z = {z*1000:.1f} mm")
-        ax.set_aspect('equal')
-        ax.axis('off')
+    for z in z_vals:
+        Rz = R_in - (R_in - R_out) * (z / L)
+        r_vals = np.linspace(0, Rz, nr)
+        theta_vals = np.linspace(0, 2 * np.pi, ntheta, endpoint=False)
 
-    # Hide any unused subplots
-    for j in range(i+1, nrows*ncols):
-        row, col = divmod(j, ncols)
-        ax = axs[row, col] if nrows > 1 else axs[col]
-        ax.axis('off')
+        for r in r_vals:
+            for theta in theta_vals:
+                x = r * np.cos(theta)
+                y = r * np.sin(theta)
 
-    # Add colorbar
-    fig.colorbar(pcm, ax=axs, orientation='vertical', shrink=0.7, label='Shear Stress (Pa)')
-    plt.suptitle("Shear Stress Cross Sections (Filled)", fontsize=16)
-    plt.show()
+                # Calculate shear rate and stress
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    gamma_dot = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (r / Rz)**(1 / n)
+                    shear = K * np.abs(gamma_dot)**n
+
+                points.append([x, y, z])
+                shear_vals.append(shear)
+
+    points = np.array(points)
+    shear_vals = np.array(shear_vals)
+
+    # --- Interpolator for shear stress ---
+    coords = np.c_[points[:, 2], points[:, 1], points[:, 0]]  # (z, y, x)
+    interpolator = LinearNDInterpolator(coords, shear_vals, fill_value=0)
+
+    # --- Load STL mesh and map shear stress ---
+    mesh = Mesh("conical_nozzle.stl")
+    mesh_pts = mesh.points
+    mesh_coords = np.c_[mesh_pts[:, 2], mesh_pts[:, 1], mesh_pts[:, 0]]
+    shear_on_mesh = interpolator(mesh_coords)
+
+    try:
+        import colorcet
+        cmap = colorcet.bmy
+    except ImportError:
+        cmap = "plasma"
+
+    mesh.pointdata["Shear Stress"] = shear_on_mesh
+    mesh.cmap(cmap, shear_on_mesh, on="points")
+    mesh.alpha(1)
+    mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
+
+    # --- Create Volume for interactive slicing ---
+    x_vals = np.linspace(points[:, 0].min(), points[:, 0].max(), 100)
+    y_vals = np.linspace(points[:, 1].min(), points[:, 1].max(), 100)
+    z_vals = np.linspace(points[:, 2].min(), points[:, 2].max(), 200)
+
+    X, Y, Z = np.meshgrid(x_vals, y_vals, z_vals, indexing='ij')
+    grid_coords = np.c_[Z.ravel(), Y.ravel(), X.ravel()]
+    grid_shear = interpolator(grid_coords).reshape(X.shape)
+
+    spacing = [x_vals[1] - x_vals[0], y_vals[1] - y_vals[0], z_vals[1] - z_vals[0]]
+    vol = Volume(grid_shear, spacing=spacing).cmap("plasma").add_scalarbar("Shear Stress (Pa)")
+
+    # --- Setup interactive slice ---
+    normal = [0, 0, 1]
+    initial_center = [0, 0, L / 2]
+    vslice = vol.slice_plane(origin=initial_center, normal=normal).cmap("plasma")
+    vslice.name = "Slice"
+
+    pcutter = PlaneCutter(
+        vslice,
+        normal=normal,
+        alpha=0,
+        c="white",
+        padding=0,
+    )
+
+    def func(w, _):
+        c, n = pcutter.origin, pcutter.normal
+        sliced = vol.slice_plane(c, n, autocrop=True).cmap("plasma")
+        sliced.name = "Slice"
+        plt.at(1).remove("Slice").add(sliced)
+
+    pcutter.add_observer("interaction", func)
+
+    # --- Create 3D point cloud (optional view) ---
+    point_cloud = Points(points)
+    point_cloud.pointdata["Shear Stress"] = shear_vals
+    point_cloud.cmap("plasma", shear_vals, on="points").point_size(3)
+
+    # --- Plot everything ---
+    plt = Plotter(N=2, axes=1, bg="k", bg2="bb")
+    plt.at(0).add(mesh, point_cloud)
+    plt.at(1).add(pcutter, vol.box(), vslice)
+    pcutter.on()
+    plt.show(zoom=1.2)
+    plt.interactive().close()

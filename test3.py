@@ -61,7 +61,7 @@ if __name__ == "__main__":
         shear[~inside] = 0
 
     spacing = [(xmax - xmin)/(nx - 1), (ymax - ymin)/(ny - 1), (zmax - zmin)/(nz - 1)]
-    vol = Volume(shear, spacing=spacing).cmap("gist_stern_r").add_scalarbar("Shear Stress (Pa)").alpha([0,0.1,0.5,1])
+    vol = Volume(shear, spacing=spacing).cmap("gist_stern_r").add_scalarbar("Shear Stress (Pa)")
 
     normal = [0, 0, 1]
 
