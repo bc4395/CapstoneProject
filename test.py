@@ -3,6 +3,7 @@ import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import LinearNDInterpolator
 from vedo import *
+from tqdm import tqdm  # <-- progress bar
 
 # ----------------- Power-law Viscosity Model -----------------
 def model(sr, K, n):
@@ -55,7 +56,8 @@ if __name__ == "__main__":
     points = []
     shear_vals = []
 
-    for z in z_vals:
+    print("Generating shear stress points...")
+    for z in tqdm(z_vals, desc="Generating points"):
         Rz = R_in - (R_in - R_out) * (z / L)
         r_vals = np.linspace(0, Rz, nr)
         theta_vals = np.linspace(0, 2 * np.pi, ntheta, endpoint=False)
@@ -65,7 +67,6 @@ if __name__ == "__main__":
                 x = r * np.cos(theta)
                 y = r * np.sin(theta)
 
-                # Calculate shear rate and stress
                 with np.errstate(divide='ignore', invalid='ignore'):
                     gamma_dot = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (r / Rz)**(1 / n)
                     shear = K * np.abs(gamma_dot)**n
@@ -76,7 +77,7 @@ if __name__ == "__main__":
     points = np.array(points)
     shear_vals = np.array(shear_vals)
 
-    # --- Interpolator for shear stress ---
+    # --- Create interpolator for shear stress ---
     coords = np.c_[points[:, 2], points[:, 1], points[:, 0]]  # (z, y, x)
     interpolator = LinearNDInterpolator(coords, shear_vals, fill_value=0)
 
@@ -97,22 +98,30 @@ if __name__ == "__main__":
     mesh.alpha(1)
     mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
 
-    # --- Create Volume for interactive slicing ---
+    # --- Build volumetric shear stress grid for interactive slicing ---
     x_vals = np.linspace(points[:, 0].min(), points[:, 0].max(), 100)
     y_vals = np.linspace(points[:, 1].min(), points[:, 1].max(), 100)
-    z_vals = np.linspace(points[:, 2].min(), points[:, 2].max(), 200)
+    z_vals_grid = np.linspace(points[:, 2].min(), points[:, 2].max(), 200)
 
-    X, Y, Z = np.meshgrid(x_vals, y_vals, z_vals, indexing='ij')
+    X, Y, Z = np.meshgrid(x_vals, y_vals, z_vals_grid, indexing='ij')
     grid_coords = np.c_[Z.ravel(), Y.ravel(), X.ravel()]
-    grid_shear = interpolator(grid_coords).reshape(X.shape)
 
-    spacing = [x_vals[1] - x_vals[0], y_vals[1] - y_vals[0], z_vals[1] - z_vals[0]]
-    vol = Volume(grid_shear, spacing=spacing).cmap("plasma").add_scalarbar("Shear Stress (Pa)")
+    print("Interpolating shear stress over volume grid...")
+    shear_vals_grid = np.empty(len(grid_coords))
+    chunk_size = 100000
+
+    for i in tqdm(range(0, len(grid_coords), chunk_size), desc="Interpolating volume grid"):
+        shear_vals_grid[i:i+chunk_size] = interpolator(grid_coords[i:i+chunk_size])
+
+    grid_shear = shear_vals_grid.reshape(X.shape)
+
+    spacing = [x_vals[1] - x_vals[0], y_vals[1] - y_vals[0], z_vals_grid[1] - z_vals_grid[0]]
+    vol = Volume(grid_shear, spacing=spacing).cmap(cmap).add_scalarbar("Shear Stress (Pa)")
 
     # --- Setup interactive slice ---
     normal = [0, 0, 1]
     initial_center = [0, 0, L / 2]
-    vslice = vol.slice_plane(origin=initial_center, normal=normal).cmap("plasma")
+    vslice = vol.slice_plane(origin=initial_center, normal=normal).cmap(cmap)
     vslice.name = "Slice"
 
     pcutter = PlaneCutter(
@@ -125,7 +134,7 @@ if __name__ == "__main__":
 
     def func(w, _):
         c, n = pcutter.origin, pcutter.normal
-        sliced = vol.slice_plane(c, n, autocrop=True).cmap("plasma")
+        sliced = vol.slice_plane(c, n, autocrop=True).cmap(cmap)
         sliced.name = "Slice"
         plt.at(1).remove("Slice").add(sliced)
 
@@ -134,7 +143,7 @@ if __name__ == "__main__":
     # --- Create 3D point cloud (optional view) ---
     point_cloud = Points(points)
     point_cloud.pointdata["Shear Stress"] = shear_vals
-    point_cloud.cmap("plasma", shear_vals, on="points").point_size(3)
+    point_cloud.cmap(cmap, shear_vals, on="points").point_size(3)
 
     # --- Plot everything ---
     plt = Plotter(N=2, axes=1, bg="k", bg2="bb")

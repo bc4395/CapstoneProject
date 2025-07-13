@@ -3,7 +3,6 @@ import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
 from vedo import *
-import random
 
 # ----------------- Power-law Viscosity Model -----------------
 def model(sr, K, n):
@@ -138,22 +137,8 @@ if __name__ == "__main__":
         slice2d.lighting("off")
         plt.at(1).remove("Slice").add(slice2d)
 
-    # --- Setup three-panel vedo plotter ---
+    # --- Setup vedo plotter ---
     plt = Plotter(N=3, axes=1, bg="k", bg2="bb")
-
-    # # Add nozzle and initial slicing to panels 0 and 1
-    # nozzle_text = Text2D(f"""
-    # Nozzle Geometry:
-    #     Inlet Radius: {R_in*1e6:.0f} µm
-    #     Outlet Radius: {R_out*1e6:.0f} µm
-    #     Length: {L*1e3:.2f} mm
-
-    # Fluid Model:
-    #     K: {K:.4e} Pa·sⁿ
-    #     n: {n:.4f}
-    #     Pressure: {pressure_psi:.1f} psi ({pressure_pa:.0f} Pa)
-    #     Flow Rate: {Q:.3e} m³/s
-    # """, pos="bottom-left", c="w", bg="k7", font="Courier")
 
     plt.at(0).add(mesh)
 
@@ -161,73 +146,6 @@ if __name__ == "__main__":
     pcutter.add_observer("interaction", func)
     plt.at(1).add(pcutter, vslice, mesh.box())
     pcutter.on()
-
-    # --- Create draggable cell sphere in third panel ---
-    sphere_radius = 0.0005  # 0.5 mm radius cell
-    # Initial position inside nozzle (centered)
-    initial_z = (zmin + zmax) / 2
-    initial_local_radius = R_in - (R_in - R_out) * (initial_z / L)
-    initial_x, initial_y = 0, 0  # Start centered
-
-    cell = Sphere(pos=(initial_x, initial_y, initial_z), r=sphere_radius, res=30, c='red')
-
-    # White indicator sphere on nozzle plot
-    indicator = Sphere(pos=cell.pos(), r=sphere_radius/4, c='white', alpha=1)
-
-    # Add indicator to nozzle plot
-    plt.at(0).add(indicator)
-
-    def update_shear_on_cell(pos):
-        # Clamp Z within nozzle length +/- margin for radius
-        z = np.clip(pos[2], zmin + sphere_radius, zmax - sphere_radius)
-        # Compute local nozzle radius at z
-        local_r = R_in - (R_in - R_out) * (z / L)
-        # Clamp XY within circle of radius (local_r - sphere_radius)
-        x, y = pos[0], pos[1]
-        r_xy = np.sqrt(x**2 + y**2)
-        max_r = local_r - sphere_radius
-        if r_xy > max_r:
-            x = x * max_r / r_xy
-            y = y * max_r / r_xy
-        # New clamped position
-        new_pos = np.array([x, y, z])
-        cell.pos(new_pos)
-
-        # Interpolate shear stress on cell surface
-        pts = cell.points
-        interp_pts = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z,y,x)
-        shear_vals = interpolator(interp_pts)
-
-        cell.pointdata["Shear Stress"] = shear_vals
-        cell.cmap(cmap, shear_vals, on="points")
-
-        # Update indicator position on nozzle plot
-        indicator.pos(new_pos)
-        plt.at(0).render()
-        plt.at(2).render()
-
-    # Initialize shear on cell and indicator
-    update_shear_on_cell(cell.pos())
-
-    # Make cell draggable with constrained movement inside nozzle bounds
-    def drag_callback(widget, event):
-        pos = widget.pos()
-        update_shear_on_cell(pos)
-
-    cell.draggable(True)
-
-    # Add draggable cell and instructions to third panel
-    instruction_text = Text2D("Drag the red cell to see shear stress update.\nPosition shown on nozzle as white sphere.", 
-                              pos="bottom-left", c="w")
-    plt.at(2).add(cell, instruction_text)
-
-    # ---- Sync camera zoom and position for consistency ----
-    # We'll link cameras across all three views
-    def sync_cameras(event):
-        cam = plt.at(0).camera()
-        plt.at(1).camera(cam)
-        plt.at(2).camera(cam)
-        plt.render()
 
     plt.show(zoom=1.2)
     plt.interactive()

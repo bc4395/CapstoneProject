@@ -3,92 +3,84 @@ import pandas as pd
 from scipy.optimize import curve_fit
 from vedo import *
 
-# --- Power-law model ---
+# ----------------- Power-law Viscosity Model -----------------
 def model(sr, K, n):
-    return K * sr ** (n - 1)
+    return K * np.power(sr, n - 1)
 
-# --- Flow rate calculation ---
+# ----------------- Flow Rate via Numerical Integration -----------------
 def calculate_flow_rate(r1, r2, L, K, n, delta_P):
     z_vals = np.linspace(0.001, L, 100)
     dz = z_vals[1] - z_vals[0]
     flow_sum = 0
     for z in z_vals:
-        Rz = r1 - (r1 - r2) * z / L
+        Rz = r1 - (r1 - r2) * z / L  # radius decreases from base to tip
         dP_dz = delta_P / L
         vz_max = ((dP_dz * Rz) / (2 * K))**(1/n)
         Qz = (np.pi * Rz**2 * vz_max) / (3*n + 1) * (n + 1)
         flow_sum += Qz * dz
     return flow_sum
 
-# --- Main ---
-if __name__ == "__main__":
-    # Load data and fit parameters
-    df = pd.read_csv("A4C4.csv")
-    sr_data = df["SR"].values
-    vis_data = df["Vis"].values
-    K, n = curve_fit(model, sr_data, vis_data, p0=[1.0, 1.0])[0]
-    print(f"Fitted K={K:.3e}, n={n:.3f}")
+# ----------------- Geometry -----------------
+R_in = 0.00175     # Base at z = L (largest radius)
+R_out = 0.0004318  # Tip at z = 0 (smallest radius)
+L = 0.0314
 
-    nozzle = load("conical_nozzle.stl")
-    bounds = nozzle.bounds()
-    xmin, xmax, ymin, ymax, zmin, zmax = bounds
-    x_center = (xmin + xmax) / 2
-    y_center = (ymin + ymax) / 2
-    L = zmax - zmin
+nz = 120           # z-layers
+nr = 15            # radial divisions per layer
+ntheta = 40        # angular divisions
 
-    R_in = 0.00175
-    R_out = 0.0004318
+# ----------------- Fit Viscosity Data -----------------
+df = pd.read_csv("A4C4.csv")
+sr_data = df["SR"].values
+vis_data = df["Vis"].values
+K, n = curve_fit(model, sr_data, vis_data, p0=[1.0, 1.0])[0]
 
-    pressure_psi = float(input("Enter pressure (psi): "))
-    pressure_pa = pressure_psi * 6894.76
-    Q = calculate_flow_rate(R_in, R_out, L, K, n, pressure_pa)
-    print(f"Flow rate Q = {Q:.3e}")
+# ----------------- Input Pressure and Compute Flow Rate -----------------
+pressure_psi = float(input("Enter pressure used (psi): "))
+pressure_pa = pressure_psi * 6894.76
+Q = calculate_flow_rate(R_in, R_out, L, K, n, pressure_pa)
 
-    nx, ny, nz = 120, 120, 200
-    x = np.linspace(xmin, xmax, nx)
-    y = np.linspace(ymin, ymax, ny)
-    z = np.linspace(zmin, zmax, nz)
-    X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+# ----------------- Compute Shear Layer-by-Layer -----------------
+points = []
+shear_vals = []
 
-    R = np.sqrt((X - x_center)**2 + (Y - y_center)**2)
-    Rz = R_out + (R_in - R_out) * (Z - zmin) / L
-    inside = R <= Rz
+z_vals = np.linspace(L, 0, nz)  # ← flipped z-direction
 
-    with np.errstate(divide='ignore', invalid='ignore'):
-        gamma_dot = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (R / Rz)**(1/n)
-        gamma_dot[~inside] = 0
-        shear = K * np.abs(gamma_dot)**n
-        shear[~inside] = 0
+for z in z_vals:
+    Rz = R_in - (R_in - R_out) * ((L - z) / L)  # radius still shrinks linearly
 
-    spacing = [(xmax - xmin)/(nx - 1), (ymax - ymin)/(ny - 1), (zmax - zmin)/(nz - 1)]
-    vol = Volume(shear, spacing=spacing).cmap("gist_stern_r").add_scalarbar("Shear Stress (Pa)")
+    # Add center point (r = 0)
+    points.append([0.0, 0.0, z])
+    shear_vals.append(0.0)  # No shear at center
 
-    normal = [0, 0, 1]
+    r_vals = np.linspace(0, Rz, nr)[1:]  # exclude center
+    theta_vals = np.linspace(0, 2 * np.pi, ntheta, endpoint=False)
 
-    # Initial slice through volume center
-    vslice = vol.slice_plane(vol.center(), normal).cmap("gist_stern_r")
-    vslice.name = "Slice"
+    for r in r_vals:
+        for theta in theta_vals:
+            x = r * np.cos(theta)
+            y = r * np.sin(theta)
 
-    plt = Plotter(N=2, axes=0, bg="black", bg2="bb")
+            # Compute shear stress
+            gamma_dot = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (r / Rz)**(1 / n)
+            shear = K * np.abs(gamma_dot)**n
 
-    def func(w, _):
-        c, n = pcutter.origin, pcutter.normal
-        new_slice = vol.slice_plane(c, n, autocrop=True).cmap("gist_stern_r")
-        new_slice.name = "Slice"
-        plt.at(1).remove("Slice").add(new_slice)
+            points.append([x, y, z])
+            shear_vals.append(shear)
 
-    pcutter = PlaneCutter(
-        vslice,
-        normal=normal,
-        alpha=0,
-        c="white",
-        padding=0,
-    )
-    pcutter.add_observer("interaction", func)
+# ----------------- Visualization -----------------
+points = np.array(points)
+shear_vals = np.array(shear_vals)
 
-    plt.at(0).add(nozzle.alpha(0.15), vol, __doc__)
-    plt.at(1).add(pcutter, vol.box())
-    pcutter.on()
+try:
+    import colorcet
+    cmap = colorcet.bmy
+except ImportError:
+    cmap = "plasma"
 
-    plt.show(zoom=1.2)
-    plt.interactive().close()
+cloud = Points(points)
+cloud.pointdata["Shear Stress"] = shear_vals
+cloud.cmap(cmap, shear_vals, on="points").point_size(3)
+cloud.add_scalarbar("Shear Stress (Pa)", c="white")
+
+show(cloud, bg="black", axes=1, title="Shear Stress per Layer in Truncated Cone")
