@@ -2,11 +2,19 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
+from scipy.spatial import cKDTree
 from vedo import *
 
 # ----------------- Power-law Viscosity Model -----------------
 def model(sr, K, n):
     return K * np.power(sr, n - 1)
+
+# ----------------- Shear Stress Calculation -----------------
+def compute_shear_stress(r, Rz, Q, K, n):
+    if r == 0:
+        return 0.0
+    gamma_dot = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (r / Rz)**(1 / n)
+    return K * np.abs(gamma_dot)**n
 
 # ----------------- Flow Rate via Numerical Integration -----------------
 def calculate_flow_rate(r1, r2, L, K, n, delta_P):
@@ -21,132 +29,89 @@ def calculate_flow_rate(r1, r2, L, K, n, delta_P):
         flow_sum += Qz * dz
     return flow_sum
 
-# ----------------- Shear Stress in Conical Cross-Section -----------------
-def compute_cross_section_shear(Q, Rz, K, n, num_xy=300):
-    x = np.linspace(-Rz, Rz, num_xy)
-    y = np.linspace(-Rz, Rz, num_xy)
-    X, Y = np.meshgrid(x, y)
-    R = np.sqrt(X**2 + Y**2)
-    mask = R <= Rz
+# ----------------- Geometry & Grid Setup -----------------
+R_in = 0.00175     # Base at z = L
+R_out = 0.0004318  # Tip at z = 0
+L = 0.0314
 
-    gamma_dot = np.zeros_like(R)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        gamma_dot[mask] = ((n + 1) / n) * (2 * Q / (np.pi * Rz**3)) * (R[mask] / Rz)**(1/n)
+nz = 250
+nr = 50
 
-    shear_stress = np.zeros_like(R)
-    shear_stress[mask] = K * np.abs(gamma_dot[mask])**n
+z_vals = np.linspace(L, 0, nz)
+y_vals = np.linspace(-R_in, R_in, 2*nr)
+x_vals = np.linspace(-R_in, R_in, 2*nr)
 
-    return x, y, shear_stress
+# ----------------- Fit Viscosity Data -----------------
+df = pd.read_csv("A4C4.csv")
+sr_data = df["SR"].values
+vis_data = df["Vis"].values
+K, n = curve_fit(model, sr_data, vis_data, p0=[1.0, 1.0])[0]
 
-# ----------------- Main Script -----------------
-if __name__ == "__main__":
-    # Load viscosity data and fit power-law model
-    try:
-        df = pd.read_csv("A4C4.csv")
-        sr_data = df['SR'].values
-        vis_data = df['Vis'].values
-        K, n = curve_fit(model, sr_data, vis_data, p0=[1.0, 1.0])[0]
-    except Exception as e:
-        raise RuntimeError(f"Failed to load/fitting data: {e}")
+# ----------------- Pressure Input & Flow -----------------
+pressure_psi = float(input("Enter pressure used (psi): "))
+pressure_pa = pressure_psi * 6894.76
+Q = calculate_flow_rate(R_in, R_out, L, K, n, pressure_pa)
 
-    # Geometry and pressure
-    R_in = 0.00175
-    R_out = 0.0004318
-    L = 0.0314
+# ----------------- Compute 3D Shear Volume -----------------
+shear_volume = np.zeros((nz, len(y_vals), len(x_vals)))
 
-    try:
-        pressure_psi = float(input("Enter pressure used (psi): "))
-    except ValueError:
-        raise ValueError("Invalid input.")
-    pressure_pa = pressure_psi * 6894.76
+for i, z in enumerate(z_vals):
+    Rz = R_in - (R_in - R_out) * ((L - z) / L)
+    for j, y in enumerate(y_vals):
+        for k, x in enumerate(x_vals):
+            r = np.sqrt(x**2 + y**2)
+            shear_volume[i, j, k] = compute_shear_stress(r, Rz, Q, K, n)
 
-    # Flow rate (numerically integrated)
-    Q = calculate_flow_rate(R_in, R_out, L, K, n, pressure_pa)
+# ----------------- Interpolator -----------------
+flipped_z_vals = z_vals[::-1]
+interpolator = RegularGridInterpolator(
+    (flipped_z_vals, y_vals, x_vals),
+    shear_volume[::-1],
+    bounds_error=False,
+    method='linear',
+    fill_value=None
+)
 
-    # Sample 3D shear stress across nozzle
-    num_z = 15
-    num_xy = 300
-    z_vals = np.linspace(0, L, num_z)
-    shear_stack = []
-    x_vals = y_vals = None
+# ----------------- Load STL & Apply Shear -----------------
+mesh = Mesh("conical_nozzle.stl")
+pts = mesh.points
+coords = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z, y, x)
+shear_vals = interpolator(coords)
 
-    for z in z_vals:
-        Rz = R_in - ((R_in - R_out) / L) * z
-        x, y, shear_2d = compute_cross_section_shear(Q, Rz, K, n, num_xy)
-        shear_stack.append(shear_2d)
-        if x_vals is None:
-            x_vals = x
-            y_vals = y
+try:
+    import colorcet
+    cmap = colorcet.bmy
+except ImportError:
+    cmap = "plasma"
 
-    shear_volume = np.stack(shear_stack, axis=0)  # shape: (z, y, x)
-    flipped_z = L - z_vals  # Match STL orientation
+mesh.pointdata["Shear Stress"] = shear_vals
+mesh.cmap(cmap, shear_vals, on="points")
+mesh.alpha(1)
+mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
 
-    # Interpolator for shear stress in 3D space
-    interpolator = RegularGridInterpolator(
-        (flipped_z, y_vals, x_vals),
-        shear_volume,
-        bounds_error=False,
-        fill_value=0
-    )
+# ----------------- Load and Position random.stl -----------------
+cell = Mesh("random.stl")
 
-    # Load STL mesh
-    mesh = Mesh("conical_nozzle.stl")
-    pts = mesh.points
-    coords = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z, y, x) order
-    shear_vals = interpolator(coords)
+# Shift to center inside the nozzle (e.g., z = L/2)
+target_center = np.array([0.0, 0.0, L / 2])
+cell_center = cell.center_of_mass()
+cell.shift(target_center - cell_center)
 
-    try:
-        import colorcet
-        cmap = colorcet.bmy
-    except ImportError:
-        cmap = "plasma"
+# ----------------- Nearest Neighbor Mapping from Nozzle to Random STL -----------------
+nozzle_tree = cKDTree(mesh.points)
+nozzle_shear = mesh.pointdata["Shear Stress"]
 
-    # Apply colormap and scalar bar to nozzle
-    mesh.pointdata["Shear Stress"] = shear_vals
-    mesh.cmap(cmap, shear_vals, on="points")
-    mesh.alpha(1)
-    mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
+_, idx = nozzle_tree.query(cell.points)  # Find closest nozzle point for each cell point
+transferred_shear = nozzle_shear[idx]
 
-    # Slice plane setup
-    zmin, zmax = mesh.bounds()[4], mesh.bounds()[5]
-    center_z = (zmin + zmax) / 2
-    normal = [0, 0, 1]
+cell.pointdata["Shear Stress"] = transferred_shear
+cell.cmap(cmap, transferred_shear, on="points")
+cell.alpha(1)
 
-    vslice = mesh.clone().intersect_with_plane(origin=[0, 0, center_z], normal=normal).triangulate()
-    if vslice.npoints > 0:
-        pts = vslice.points
-        interp_coords = np.c_[np.full(pts.shape[0], center_z), pts[:, 1], pts[:, 0]]
-        stress_vals = interpolator(interp_coords)
-        vslice.cmap(cmap, stress_vals, on="points").alpha(1)
-        vslice.lighting("off")
-        vslice.name = "Slice"
-        vslice.add_scalarbar(title="Shear Stress (Pa)", c="w")
+# ----------------- Show Main Nozzle View (plt1) -----------------
+plt1 = Plotter(title="Shear Field View", size=(900, 700), axes=1, bg="k")
+plt1.show(mesh, zoom=1.2, viewup="z", interactive=False)
 
-    # Interactive slicing callback
-    def func(w, _):
-        c, n = pcutter.origin, pcutter.normal
-        zval = c[2]
-        slice2d = mesh.clone().intersect_with_plane(origin=c, normal=n).triangulate()
-        if not slice2d.npoints:
-            return
-        pts = slice2d.points
-        interp_coords = np.c_[np.full(pts.shape[0], zval), pts[:, 1], pts[:, 0]]
-        vals = interpolator(interp_coords)
-        slice2d.cmap(cmap, vals, on="points").alpha(1)
-        slice2d.name = "Slice"
-        slice2d.lighting("off")
-        plt.at(1).remove("Slice").add(slice2d)
-
-    # --- Setup vedo plotter ---
-    plt = Plotter(N=3, axes=1, bg="k", bg2="bb")
-
-    plt.at(0).add(mesh)
-
-    pcutter = PlaneCutter(vslice, normal=normal, alpha=0, c="white")
-    pcutter.add_observer("interaction", func)
-    plt.at(1).add(pcutter, vslice, mesh.box())
-    pcutter.on()
-
-    plt.show(zoom=1.2)
-    plt.interactive()
-    plt.close()
+# ----------------- Show Random STL as Simulation Cell (plt2) -----------------
+plt2 = Plotter(title="Simulation Cell View (random.stl)", size=(600, 600), axes=1, bg="bb")
+plt2.show(cell, zoom=1.5, viewup="z", interactive=True)

@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
+from scipy.spatial import cKDTree
 from vedo import *
 
 # ----------------- Power-law Viscosity Model -----------------
@@ -33,9 +34,8 @@ R_in = 0.00175     # Base at z = L
 R_out = 0.0004318  # Tip at z = 0
 L = 0.0314
 
-nz = 100           # axial layers
-nr = 45            # radial points
-ntheta = 240        # angular slices
+nz = 250
+nr = 50
 
 z_vals = np.linspace(L, 0, nz)
 y_vals = np.linspace(-R_in, R_in, 2*nr)
@@ -66,7 +66,7 @@ for i, z in enumerate(z_vals):
 flipped_z_vals = z_vals[::-1]
 interpolator = RegularGridInterpolator(
     (flipped_z_vals, y_vals, x_vals),
-    shear_volume[::-1],  # match z-flip
+    shear_volume[::-1],
     bounds_error=False,
     method='linear',
     fill_value=None
@@ -75,7 +75,7 @@ interpolator = RegularGridInterpolator(
 # ----------------- Load STL & Apply Shear -----------------
 mesh = Mesh("conical_nozzle.stl")
 pts = mesh.points
-coords = np.c_[pts[:, 2], pts[:, 0], pts[:, 1]]  # (z, y, x)
+coords = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z, y, x)
 shear_vals = interpolator(coords)
 
 try:
@@ -89,64 +89,33 @@ mesh.cmap(cmap, shear_vals, on="points")
 mesh.alpha(1)
 mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
 
-# ----------------- Initial Slice -----------------
-zmin, zmax = mesh.bounds()[4], mesh.bounds()[5]
-center_z = (zmin + zmax) / 2
-normal = [0, 0, 1]
+# ----------------- Load and Position random.stl -----------------
+cell = Mesh("random.stl")
 
-vslice = mesh.slice(normal=normal, origin=[0, 0, center_z])
-vslice.name = "Slice"
+# Shift to center inside the nozzle (e.g., z = L/2)
+target_center = np.array([0.0, 0.0, L / 2])
+cell_center = cell.center_of_mass()
+cell.shift(target_center - cell_center)
 
-# ----------------- Interactive Slice Handler -----------------
-def func(w, _):
-    c, n = pcutter.origin, pcutter.normal
-    zval = c[2]
-    slice2d = mesh.slice(normal=n, origin=c)
-    if not slice2d.npoints:
-        return
-    pts = slice2d.points
-    interp_coords = np.c_[np.full(pts.shape[0], zval), pts[:, 1], pts[:, 0]]
-    vals = interpolator(interp_coords)
-    slice2d.cmap(cmap, vals, on="points").alpha(1)
-    slice2d.name = "Slice"
-    slice2d.lighting("off")
-    vslice.add_scalarbar(title="Shear Stress (Pa)", c="w")
-    plt.at(1).remove("Slice").add(slice2d)
+# ----------------- Nearest Neighbor Mapping from Nozzle to Random STL -----------------
+nozzle_tree = cKDTree(mesh.points)
+nozzle_shear = mesh.pointdata["Shear Stress"]
 
-# ----------------- Original Point Cloud -----------------
-points = []
-shear_vals_pts = []
+_, idx = nozzle_tree.query(cell.points)  # Find closest nozzle point for each cell point
+transferred_shear = nozzle_shear[idx]
 
-for z in z_vals:
-    Rz = R_in - (R_in - R_out) * ((L - z) / L)
-    points.append([0.0, 0.0, z])
-    shear_vals_pts.append(0.0)
+cell.pointdata["Shear Stress"] = transferred_shear
+cell.cmap(cmap, transferred_shear, on="points")
+cell.alpha(1)
 
-    r_vals = np.linspace(0, Rz, nr)[1:]
-    theta_vals = np.linspace(0, 2 * np.pi, ntheta, endpoint=False)
+# ----------------- Show Main Nozzle View (plt1) -----------------
+plt1 = Plotter(title="Shear Field View", size=(900, 700), axes=1, bg="k")
+plt1.show(mesh, zoom=1.2, viewup="z", interactive=False)
 
-    for r in r_vals:
-        for theta in theta_vals:
-            x = r * np.cos(theta)
-            y = r * np.sin(theta)
-            shear = compute_shear_stress(r, Rz, Q, K, n)
-            points.append([x, y, z])
-            shear_vals_pts.append(shear)
+# ----------------- Show Random STL as Simulation Cell (plt2) -----------------
+plt2 = Plotter(title="Simulation Cell View (random.stl)", size=(600, 600), axes=1, bg="bb")
+plt2.show(cell, zoom=1.5, viewup="z", interactive=True)
 
-cloud = Points(np.array(points))
-cloud.pointdata["Shear Stress"] = np.array(shear_vals_pts)
-cloud.cmap(cmap, shear_vals_pts, on="points").point_size(3)
-cloud.add_scalarbar("Shear Stress (Pa)", c="white")
-
-# ----------------- Final Visualization -----------------
-plt = Plotter(N=2, axes=1, bg="k", bg2="bb")
-plt.at(0).add(mesh)
-
-pcutter = PlaneCutter(vslice, normal=normal, alpha=0, c="white", padding=0,)
-pcutter.add_observer("interaction", func)
-plt.at(1).add(pcutter, vslice, mesh.box())
-pcutter.on()
-
-plt.show(zoom=1.2)
-plt.interactive()
-plt.close()
+# Joint debug view
+plt_debug = Plotter(title="Debug View", axes=1, bg="black")
+plt_debug.show(mesh, cell, zoom=1.2, viewup="z", interactive=True)
