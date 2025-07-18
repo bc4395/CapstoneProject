@@ -1,8 +1,10 @@
+# IGNORE_FILE
+
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
-from scipy.spatial import cKDTree
 from vedo import *
 
 # ----------------- Power-law Viscosity Model -----------------
@@ -30,16 +32,19 @@ def calculate_flow_rate(r1, r2, L, K, n, delta_P):
     return flow_sum
 
 # ----------------- Geometry & Grid Setup -----------------
-R_in = 0.00175     # Base at z = L
-R_out = 0.0004318  # Tip at z = 0
-L = 0.0314
+R_in = 0.00175     # Base at z = L (m)
+R_out = 0.0004318  # Tip at z = 0 (m)
+L = 0.0314         # Length (m)
 
-nz = 250
+nz = 101
 nr = 50
+ntheta = 240
 
 z_vals = np.linspace(L, 0, nz)
 y_vals = np.linspace(-R_in, R_in, 2*nr)
 x_vals = np.linspace(-R_in, R_in, 2*nr)
+
+X, Y = np.meshgrid(x_vals, y_vals)
 
 # ----------------- Fit Viscosity Data -----------------
 df = pd.read_csv("A4C4.csv")
@@ -54,7 +59,6 @@ Q = calculate_flow_rate(R_in, R_out, L, K, n, pressure_pa)
 
 # ----------------- Compute 3D Shear Volume -----------------
 shear_volume = np.zeros((nz, len(y_vals), len(x_vals)))
-
 for i, z in enumerate(z_vals):
     Rz = R_in - (R_in - R_out) * ((L - z) / L)
     for j, y in enumerate(y_vals):
@@ -72,48 +76,61 @@ interpolator = RegularGridInterpolator(
     fill_value=None
 )
 
-# ----------------- Load STL & Apply Shear -----------------
+# ----------------- Load STL Nozzle -----------------
 mesh = Mesh("conical_nozzle.stl")
 pts = mesh.points
 coords = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z, y, x)
 shear_vals = interpolator(coords)
 
+# ----------------- Apply Shear Stress Colors to 3D Mesh -----------------
 try:
     import colorcet
-    cmap = colorcet.bmy
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list("bmy", colorcet.bmy)
 except ImportError:
     cmap = "plasma"
+
+shear_min = np.nanmin(shear_volume)
+shear_max = np.nanmax(shear_volume)
 
 mesh.pointdata["Shear Stress"] = shear_vals
 mesh.cmap(cmap, shear_vals, on="points")
 mesh.alpha(1)
 mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
 
-# ----------------- Load and Position random.stl -----------------
-cell = Mesh("random.stl")
+# ----------------- Show 3D Model -----------------
 
-# Shift to center inside the nozzle (e.g., z = L/2)
-target_center = np.array([0.0003, 0.0003, L / 2])
-cell_center = cell.center_of_mass()
-cell.shift(target_center - cell_center)
+plt1 = Plotter(title="3D Shear Field", size=(900, 700), axes=1, bg="k")
+plt1.show(mesh, zoom=1.2, viewup="z", interactive=True)
+plt1.close()
 
-# ----------------- Nearest Neighbor Mapping: Transfer Colors Instead of Values -----------------
-nozzle_tree = cKDTree(mesh.points)
-_, idx = nozzle_tree.query(cell.points)  # nearest nozzle point for each random.stl point
+# ----------------- Cross Sectional View -----------------
+#import matplotlib.pyplot as plt
 
-# Transfer both stress values and actual RGB colors
-transferred_shear = mesh.pointdata["Shear Stress"][idx]
-transferred_colors = mesh.pointcolors[idx]
+c_section_height = float(input("Enter cross-section height as percentage of length (0-100): "))
+z2 = L * (c_section_height / 100.0)
 
-# Apply to random.stl
-cell.pointdata["Shear Stress"] = transferred_shear
-cell.pointcolors = transferred_colors
-cell.alpha(1)
+# Arrays to store cross-section locaiton and shear values
+cross_pts = []
+cross_xy = {}
+cross_z = []
+cross_shear_val = []
+cross_shear_pts = {}
 
-# ----------------- Show Main Nozzle View (plt1) -----------------
-plt1 = Plotter(title="Shear Field View", size=(900, 700), axes=1, bg="k")
-plt1.show(mesh, zoom=1.2, viewup="z", interactive=False)
+# Calculating radius values at the specified height
+Rz2 = R_in - (R_in - R_out) * ((L - z2) / L)
+cross_pts.append([0.0, 0.0, z2])
+cross_shear_val.append(0.0)
 
-# ----------------- Show Random STL as Simulation Cell (plt2) -----------------
-plt2 = Plotter(title="Simulation Cell View (random.stl)", size=(600, 600), axes=1, bg="bb")
-plt2.show(cell, zoom=1.5, viewup="z", interactive=True)
+r_vals = np.linspace(0, Rz2, nr)[1:]
+theta_vals = np.linspace(0, 2 * np.pi, ntheta, endpoint=False)
+
+for r in r_vals:
+    for theta in theta_vals:
+        x2 = r * np.cos(theta)
+        y2 = r * np.sin(theta)
+        shear = compute_shear_stress(r, Rz2, Q, K, n)
+        cross_pts.append([x2, y2, z2])
+        cross_xy[z2].append([x2, y2])
+        cross_shear_pts[(z2, x2, y2)] = shear
+        cross_shear_val.append(shear)
