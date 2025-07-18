@@ -141,7 +141,7 @@ min_shear = min(shear_vals_pts)
 max_shear = max(shear_vals_pts)
 
 # --- Setup custom subplot layout using GridSpec ---
-fig = plt.figure(figsize=(12, 10))
+fig = plt.figure(figsize=(10, 10))
 gs = GridSpec(2, 2, figure=fig)
 
 # Place plots: top-left, top-right, bottom-left
@@ -191,7 +191,7 @@ for ax, percentage in zip(axes, percentages):
         slice_shear_vals.append(shear)
 
     sc = ax.scatter(*zip(*slice_points), c=slice_shear_vals, cmap='plasma', vmin=min_shear, vmax=max_shear)
-    ax.set_title(f'Shear Stress at {percentage:.1f}% (z = {slice_z:.2f} m, R = {Rz:.4f} m)')
+    ax.set_title(f'Shear Stress at {percentage:.1f}% (z = {slice_z*1000:.3f} mm, R = {Rz*1000:.3f} mmm)')
     ax.set_xlabel('x (m)')
     ax.set_ylabel('y (m)')
     ax.axis('equal')
