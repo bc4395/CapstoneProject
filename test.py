@@ -1,10 +1,9 @@
-# Updated Script into Main File
-
-
 import numpy as np
 import pandas as pd
 from scipy.optimize import curve_fit
 from scipy.interpolate import RegularGridInterpolator
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 from vedo import *
 
 # ----------------- Power-law Viscosity Model -----------------
@@ -84,7 +83,7 @@ pts = mesh.points
 coords = np.c_[pts[:, 2], pts[:, 1], pts[:, 0]]  # (z, y, x)
 shear_vals = interpolator(coords)
 
-# ----------------- Apply Shear Stress Colors to 3D Mesh -----------------
+# Apply shear stress colors
 try:
     import colorcet
     from matplotlib.colors import LinearSegmentedColormap
@@ -92,36 +91,25 @@ try:
 except ImportError:
     cmap = "plasma"
 
-shear_min = np.nanmin(shear_volume)
-shear_max = np.nanmax(shear_volume)
-
 mesh.pointdata["Shear Stress"] = shear_vals
-mesh.cmap(cmap, shear_vals, on="points")
+mesh.cmap(cmap, shear_vals, on="points", vmax=np.max(shear_vals), vmin=np.min(shear_vals))
 mesh.alpha(1)
 mesh.add_scalarbar(title="Shear Stress (Pa)", c="w")
 
-# ----------------- Show 3D Model -----------------
-
+# ----------------- First Plot: Just Nozzle -----------------
 plt1 = Plotter(title="3D Shear Field", size=(900, 700), axes=1, bg="k")
 plt1.show(mesh, zoom=1.2, viewup="z", interactive=True)
-plt1.close()
 
 # ----------------- Cross Sectional View -----------------
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
-
-# Arrays to store cross-section locaiton and shear values
 points = []
 shear_vals_pts = []
 xy_points = {}
 shear_points = {}
 
-# Initialize xy_points dictionary
 for z in z_vals:
     if z not in xy_points:
         xy_points[z] = []
 
-# Calculate shear stress at all grid points for cross sections
 for z in z_vals:
     Rz = R_in - (R_in - R_out) * ((L - z) / L)
     points.append([0.0, 0.0, z])
@@ -140,22 +128,13 @@ for z in z_vals:
             shear_points[(z, x, y)] = shear
             shear_vals_pts.append(shear)
 
-# Determine global min/max shear for consistent color scaling
 min_shear = min(shear_vals_pts)
 max_shear = max(shear_vals_pts)
 
-# --- Setup custom subplot layout using GridSpec ---
-fig = plt.figure(figsize=(12, 10))
+fig = plt.figure(figsize=(10, 10))
 gs = GridSpec(2, 2, figure=fig)
+axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[1, 0])]
 
-# Place plots: top-left, top-right, bottom-left
-axes = [
-    fig.add_subplot(gs[0, 0]),
-    fig.add_subplot(gs[0, 1]),
-    fig.add_subplot(gs[1, 0])
-]
-
-# --- Recalculating for Cross sections ---
 percentages = []
 for i in range(3):
     percentage = float(input(f"Enter cross section height {i+1} as percentage (0-100): "))
@@ -181,7 +160,6 @@ for i in range(3):
                 shear_points[(slice_z, x, y)] = shear
                 shear_vals_pts.append(shear)
 
-# --- Plot each subplot ---
 for ax, percentage in zip(axes, percentages):
     slice_z = L * (percentage / 100.0)
     Rz = R_in - (R_in - R_out) * ((L - slice_z) / L)
@@ -195,14 +173,60 @@ for ax, percentage in zip(axes, percentages):
         slice_shear_vals.append(shear)
 
     sc = ax.scatter(*zip(*slice_points), c=slice_shear_vals, cmap='plasma', vmin=min_shear, vmax=max_shear)
-    ax.set_title(f'Shear Stress at {percentage:.1f}% (z = {slice_z:.2f} m, R = {Rz:.4f} m)')
+    ax.set_title(f'Shear Stress at {percentage:.1f}% (z = {slice_z*1000:.3f} mm, R = {Rz*1000:.3f} mmm)')
     ax.set_xlabel('x (m)')
     ax.set_ylabel('y (m)')
     ax.axis('equal')
     ax.grid(False)
 
-# --- Show Plots ---
 cbar_ax = fig.add_axes([0.91, 0.11, 0.02, 0.3])
 fig.colorbar(sc, cax=cbar_ax, label='Shear Stress (Pa)')
-plt.tight_layout(rect=[0, 0, 0.9, 1])
 plt.show()
+
+# ----------------- Cell Visualization Using Point Cloud -----------------
+cell_center = [0.0, 0.0, 0.025]  # Center of the cell in (x, y, z)
+cell_radius = 0.001
+
+cell_points = []
+cell_shear_vals = []
+
+for (x, y, z), shear in zip(points, shear_vals_pts):
+    dx = x - cell_center[0]
+    dy = y - cell_center[1]
+    dz = z - cell_center[2]
+    if dx**2 + dy**2 + dz**2 <= cell_radius**2:
+        cell_points.append([x, y, z])
+        cell_shear_vals.append(shear)
+
+cell_points_np = np.array(cell_points)
+
+if len(cell_points_np) > 0:
+    cell_sphere = Points(cell_points_np, r=10)
+    cell_sphere.pointdata["Shear Stress"] = cell_shear_vals
+    cell_sphere.cmap("plasma", cell_shear_vals, on="points", vmax=max_shear, vmin=min_shear)
+else:
+    cell_sphere = None
+    print("Warning: No points found inside the sphere.")
+
+cell_outline = Sphere(pos=cell_center, r=cell_radius, c='w', alpha=0.3, res=30)
+
+# -------- Smooth Sphere Colored via Interpolator --------
+from vedo import Sphere as SmoothSphere
+
+cell_sphere_mesh = SmoothSphere(pos=cell_center, r=cell_radius, res=60)
+verts = cell_sphere_mesh.points
+coords = np.c_[verts[:, 2], verts[:, 1], verts[:, 0]]  # (z, y, x) order
+
+# Interpolate shear values
+shear_vals_interp = interpolator(coords)
+cell_sphere_mesh.pointdata["Shear Stress"] = shear_vals_interp
+cell_sphere_mesh.cmap("plasma", shear_vals_interp, on="points", vmax=max_shear, vmin=min_shear)
+
+plt2a = Plotter(title="Nozzle with Cell Location", size=(900, 700), axes=1, bg="k")
+plt2a.show(mesh, cell_outline, zoom=1.2, viewup="z", interactive=False)
+
+plt2b = Plotter(title="Shear Stress on Cell", size=(700, 700), axes=1, bg="k")
+if cell_sphere:
+    plt2b.show(cell_sphere_mesh, zoom=1.5, viewup="z", interactive=True)
+else:
+    plt2b.show(cell_outline, zoom=1.5, viewup="z", interactive=True)
